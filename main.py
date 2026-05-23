@@ -59,6 +59,6 @@ async def chat(interaction: discord.Interaction, channel: discord.abc.GuildChann
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
 import os
-TOKEN = os.environ.get(“DISCORD_TOKEN”)
+TOKEN = os.environ.get('DISCORD_TOKEN')
 
 bot.run(TOKEN)
