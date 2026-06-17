@@ -29,7 +29,6 @@ warn_data = {}
 
 # ========================================================
 # 警告の有効期限（3週間）を定期チェックするタスク（1分ごとに確認）
-# ※ボットより先にこれを作ることでエラーを回避します
 # ========================================================
 @tasks.loop(minutes=1)
 async def check_warn_expiry():
@@ -55,7 +54,7 @@ class MyBot(commands.Bot):
 
     # ボット起動時にスラッシュコマンドをサーバーに同期する
     async def setup_hook(self):
-        check_warn_expiry.start() # 順番を直したので今度はエラーになりません！
+        check_warn_expiry.start()
         await self.tree.sync()
         print("スラッシュコマンドを同期しました。")
 
@@ -86,7 +85,7 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
 # ========================================================
-# 新機能：/warn コマンド
+# /warn コマンド
 # ========================================================
 @bot.tree.command(name="warn", description="ユーザーに警告を付与し、回数に応じて自動で処罰します")
 @app_commands.describe(
@@ -153,7 +152,64 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     await interaction.response.send_message(msg + punishment_msg)
 
 # ========================================================
-# 新機能：/warns コマンド
+# 新機能：/unwarn コマンド
+# ========================================================
+@bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
+@app_commands.describe(
+    member="警告を解除したいユーザーを選択してください",
+    num="消したい履歴の番号（#のあとの数字）を入力してください（空欄なら最新の1件を削除）"
+)
+async def unwarn(interaction: discord.Interaction, member: discord.Member, num: int = None):
+    # 権限チェック
+    if not interaction.user.guild_permissions.manage_messages:
+        await interaction.response.send_message("このコマンドを実行する権限がありません（メッセージの管理権限が必要です）。", ephemeral=True)
+        return
+
+    user_id = member.id
+    # 警告データ自体がない、または合計が0の場合
+    if user_id not in warn_data or not warn_data[user_id]["logs"] or warn_data[user_id]["count"] == 0:
+        await interaction.response.send_message(f"👤 {member.mention} には消去する警告履歴がありません。", ephemeral=True)
+        return
+
+    data = warn_data[user_id]
+    
+    # 履歴番号が指定されなかった場合は、一番最新（最後）のログを対象にする
+    if num is None:
+        target_index = len(data["logs"]) - 1
+        display_num = target_index + 1
+    else:
+        # ユーザーが指定した番号（1スタート）を配列のインデックス（0スタート）に直す
+        target_index = num - 1
+        display_num = num
+        
+        # 存在しない履歴番号が指定された場合
+        if target_index < 0 or target_index >= len(data["logs"]):
+            await interaction.response.send_message(f"❌ 履歴番号 `#{num}` は存在しません。`/warns` で正しい番号を確認してください。", ephemeral=True)
+            return
+
+    # 対象のログを取得
+    removed_log = data["logs"][target_index]
+    removed_count = removed_log["count"]
+    
+    # 合計数から引く（マイナスにならないようにガード）
+    data["count"] = max(0, data["count"] - removed_count)
+    
+    # ログの一覧から削除
+    data["logs"].pop(target_index)
+
+    # 応答メッセージ
+    msg = (
+        f"✅ **警告を取り消しました**\n"
+        f"**対象者:** {member.mention}\n"
+        f"**消去した履歴:** `#{display_num}` (付与されていた警告: {removed_count}個)\n"
+        f"**元々の理由:** {removed_log['reason']}\n"
+        f"📉 **修正後の合計警告数:** `{data['count']}` 個\n"
+    )
+    
+    await interaction.response.send_message(msg)
+
+# ========================================================
+# /warns コマンド
 # ========================================================
 @bot.tree.command(name="warns", description="指定したユーザーの警告履歴を確認します")
 @app_commands.describe(member="警告履歴を見たいユーザーを選択してください")
@@ -175,11 +231,11 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
         color=discord.Color.red()
     )
 
-    for i, log in enumerate(reversed(data["logs"])):
+    for i, log in enumerate(data["logs"]):  # 履歴番号順（#1, #2...）に並ぶよう修正
         if i >= 20:
             break
         embed.add_field(
-            name=f"履歴 #{len(data['logs']) - i} ({log['date']})",
+            name=f"履歴 #{i + 1} ({log['date']})",
             value=f"**付与数:** {log['count']}個\n**理由:** {log['reason']}",
             inline=False
         )
