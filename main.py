@@ -5,7 +5,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
-from datetime import datetime, timedelta, timezone
 
 # ========================================================
 # 【Render無料プラン用】自動停止を防ぐためのダミーWebサーバー
@@ -26,27 +25,11 @@ intents.message_content = True
 intents.members = True 
 
 # 警告データを保存する辞書
-# 構造: { user_id: { "count": 合計数, "expire_at": 消滅する日時, "logs": [ { "count": つけた数, "reason": 理由, "date": 日時 } ] } }
 warn_data = {}
-
-class MyBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-
-    # ボット起動時にスラッシュコマンドをサーバーに同期する
-    async def setup_hook(self):
-        self.check_warn_expiry.start() # 警告の期限チェックタイマーを起動
-        await self.tree.sync()
-        print("スラッシュコマンドを同期しました。")
-
-bot = MyBot()
-
-@bot.event
-async def on_ready():
-    print(f"ログインしました: {bot.user.name}")
 
 # ========================================================
 # 警告の有効期限（3週間）を定期チェックするタスク（1分ごとに確認）
+# ※ボットより先にこれを作ることでエラーを回避します
 # ========================================================
 @tasks.loop(minutes=1)
 async def check_warn_expiry():
@@ -66,6 +49,22 @@ async def check_warn_expiry():
         })
         print(f"ユーザーID: {user_id} の警告が期限切れのためリセットされました。")
 
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents)
+
+    # ボット起動時にスラッシュコマンドをサーバーに同期する
+    async def setup_hook(self):
+        check_warn_expiry.start() # 順番を直したので今度はエラーになりません！
+        await self.tree.sync()
+        print("スラッシュコマンドを同期しました。")
+
+bot = MyBot()
+
+@bot.event
+async def on_ready():
+    print(f"ログインしました: {bot.user.name}")
+
 # ========================================================
 # 既存の /chat コマンド
 # ========================================================
@@ -75,7 +74,6 @@ async def check_warn_expiry():
     text="送信する本文を入力してください"
 )
 async def chat(interaction: discord.Interaction, channel: discord.TextChannel, text: str):
-
     if isinstance(channel, discord.TextChannel):
         try:
             await channel.send(text)
@@ -97,7 +95,6 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
     reason="警告の理由を入力してください"
 )
 async def warn(interaction: discord.Interaction, member: discord.Member, count: int, reason: str):
-    # 実行者に「メンバー管理権限」があるか確認
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message("このコマンドを実行する権限がありません（メッセージの管理権限が必要です）。", ephemeral=True)
         return
@@ -108,18 +105,14 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
 
     user_id = member.id
     now = datetime.now(timezone.utc)
-    # 新しい期限（今から3週間後）
     new_expire_at = now + timedelta(weeks=3)
 
-    # データの初期化または更新
     if user_id not in warn_data:
         warn_data[user_id] = {"count": 0, "expire_at": new_expire_at, "logs": []}
     
-    # 警告を追加し、期限を「全員一律で3週間後」に上書きリセット
     warn_data[user_id]["count"] += count
     warn_data[user_id]["expire_at"] = new_expire_at
     
-    # ログを記録
     current_time_str = now.strftime('%Y-%m-%d %H:%M:%S')
     warn_data[user_id]["logs"].append({
         "count": count,
@@ -128,12 +121,9 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     })
 
     total_warns = warn_data[user_id]["count"]
-    
-    # 日本時間での期限表示用（+9時間）
     expire_jst = new_expire_at + timedelta(hours=9)
     expire_str = expire_jst.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 基本の応答メッセージを作成
     msg = (
         f"⚠️ **ユーザーに警告を与えました**\n"
         f"**対象者:** {member.mention}\n"
@@ -143,7 +133,6 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
         f"⏳ *もう一度警告されたため、全警告の期限がリセットされました。次回自動解除: {expire_str} (JST)*\n"
     )
 
-    # 警告数に応じた処罰のチェック
     punishment_msg = ""
     try:
         if total_warns >= 10:
@@ -159,7 +148,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
             await member.timeout(timedelta(hours=3), reason=f"警告合計{total_warns}回に到達のため自動タイムアウト")
             punishment_msg = "⏱️ **合計警告数が3個に達したため、3時間のタイムアウトを付与しました。**"
     except discord.Forbidden:
-        punishment_msg = "\n❌ *ボットの権限が足りないため、自動処罰（タイムアウト/キック/BAN）を実行できませんでした。ボットのロールを上に上げてください。*"
+        punishment_msg = "\n❌ *ボットの権限が足りないため、自動処罰を実行できませんでした。ボットのロールを上に上げてください。*"
 
     await interaction.response.send_message(msg + punishment_msg)
 
@@ -186,9 +175,8 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
         color=discord.Color.red()
     )
 
-    # 過去の警告履歴を埋め込みに最大25件まで追加
     for i, log in enumerate(reversed(data["logs"])):
-        if i >= 20: # スマホで見やすいように直近20件までに制限
+        if i >= 20:
             break
         embed.add_field(
             name=f"履歴 #{len(data['logs']) - i} ({log['date']})",
