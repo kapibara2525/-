@@ -73,7 +73,8 @@ async def check_warn_expiry():
     channel="メッセージを送信したいチャンネルを選択してください",
     text="送信する本文を入力してください"
 )
-async def chat(interaction: discord.Interaction, channel: discord.abc.GuildChannel, text: str):
+async def chat(interaction: discord.Interaction, channel: discord.TextChannel, text: str):
+
     if isinstance(channel, discord.TextChannel):
         try:
             await channel.send(text)
