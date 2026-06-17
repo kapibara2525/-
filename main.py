@@ -154,59 +154,45 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
 # ========================================================
 # 新機能：/unwarn コマンド
 # ========================================================
-@bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
+@tree.command(name="unwarn", description="メンバーの警告を削除します（数を指定しない場合はすべて削除します）")
 @app_commands.describe(
-    member="警告を解除したいユーザーを選択してください",
-    num="消したい履歴の番号（#のあとの数字）を入力してください（空欄なら最新の1件を削除）"
+    member="警告を消すメンバーを選択してください",
+    amount="消す警告の数を入力してください（省略するとすべて消します）"
 )
-async def unwarn(interaction: discord.Interaction, member: discord.Member, num: int = None):
-    # 権限チェック
-    if not interaction.user.guild_permissions.manage_messages:
-        await interaction.response.send_message("このコマンドを実行する権限がありません（メッセージの管理権限が必要です）。", ephemeral=True)
+async def unwarn(interaction: discord.Interaction, member: discord.Interactive, amount: int = None):
+    # 権限チェック（管理者権限など、必要に応じて残してください）
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("このコマンドを実行する権限がありません。", ephemeral=True)
         return
 
-    user_id = member.id
-    # 警告データ自体がない、または合計が0の場合
-    if user_id not in warn_data or not warn_data[user_id]["logs"] or warn_data[user_id]["count"] == 0:
-        await interaction.response.send_message(f"👤 {member.mention} には消去する警告履歴がありません。", ephemeral=True)
-        return
-
-    data = warn_data[user_id]
+    # ここでデータベースやファイルから対象メンバーの警告データを取得する（例として `warnings` 変数とします）
+    # ※お使いの保存方法（JSONなど）に合わせて読み込み処理を入れてください
+    user_id = str(member.id)
     
-    # 履歴番号が指定されなかった場合は、一番最新（最後）のログを対象にする
-    if num is None:
-        target_index = len(data["logs"]) - 1
-        display_num = target_index + 1
+    # 警告が1つもない場合
+    if user_id not in warnings or len(warnings[user_id]) == 0:
+        await interaction.response.send_message(f"{member.display_name} には現在、警告はありません。", ephemeral=True)
+        return
+
+    total_warnings = len(warnings[user_id])
+
+    # 個数が指定されていない（None）、または現在の警告数より多い数字が指定された場合は「すべて削除」
+    if amount is None or amount >= total_warnings:
+        warnings[user_id] = []  # リストを空にする
+        actual_removed = total_warnings
+        message = f"{member.mention} の警告をすべて削除しました！（計 {actual_removed} 個）"
     else:
-        # ユーザーが指定した番号（1スタート）を配列のインデックス（0スタート）に直す
-        target_index = num - 1
-        display_num = num
-        
-        # 存在しない履歴番号が指定された場合
-        if target_index < 0 or target_index >= len(data["logs"]):
-            await interaction.response.send_message(f"❌ 履歴番号 `#{num}` は存在しません。`/warns` で正しい番号を確認してください。", ephemeral=True)
-            return
+        # 指定された数だけ、新しい（後ろの）警告から削除する
+        # （例：3個あるうちの1個消すなら、一番最近の1個を消す）
+        for _ in range(amount):
+            if warnings[user_id]:
+                warnings[user_id].pop() # 一番後ろの要素を削除
+        actual_removed = amount
+        message = f"{member.mention} の警告を最近のものから {actual_removed} 個削除しました。（残り {len(warnings[user_id])} 個）"
 
-    # 対象のログを取得
-    removed_log = data["logs"][target_index]
-    removed_count = removed_log["count"]
-    
-    # 合計数から引く（マイナスにならないようにガード）
-    data["count"] = max(0, data["count"] - removed_count)
-    
-    # ログの一覧から削除
-    data["logs"].pop(target_index)
+    # ※ここにデータベースやファイルを「保存」する処理を入れてください（例: save_warnings() など）
 
-    # 応答メッセージ
-    msg = (
-        f"✅ **警告を取り消しました**\n"
-        f"**対象者:** {member.mention}\n"
-        f"**消去した履歴:** `#{display_num}` (付与されていた警告: {removed_count}個)\n"
-        f"**元々の理由:** {removed_log['reason']}\n"
-        f"📉 **修正後の合計警告数:** `{data['count']}` 個\n"
-    )
-    
-    await interaction.response.send_message(msg)
+    await interaction.response.send_message(message)
 
 # ========================================================
 # /warns コマンド
