@@ -87,31 +87,51 @@ async def on_ready():
     print(f"ログインしました: {bot.user.name}")
 
 # ========================================================
-# 改良機能：/mo コマンド（@hereメンション・サーバー名対応）
+# 改良機能：/mo コマンド（結果自動集計・@hereスッキリ版）
 # ========================================================
 EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
-async def poll_timer(guild_id, channel_id, message_id, minutes, title, choices_text):
+async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_choices):
     await asyncio.sleep(minutes * 60)
     try:
         guild = bot.get_guild(guild_id) or await bot.fetch_guild(guild_id)
         channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
         message = await channel.fetch_message(message_id)
         
+        # リアクションを集計する
+        results = []
+        total_votes = 0
+        
+        for i, choice in enumerate(valid_choices):
+            # メッセージについている特定の絵文字のリアクションを探す
+            reaction = discord.utils.get(message.reactions, emoji=EMOJIS[i])
+            # ボット自身が最初につけた1票を引く（純粋な投票数にする）
+            count = (reaction.count - 1) if reaction else 0
+            results.append((choice, count))
+            total_votes += count
+            
+        # 結果発表用のテキストを作成
+        result_text = "ーー 【集計結果】 ーー\n"
+        for i, (choice, count) in enumerate(results):
+            result_text += f"{EMOJIS[i]} **{choice}**: `{count}` 票\n"
+        result_text += f"\n総投票数: `{total_votes}` 票"
+
+        # 投票完了時のEmbedを更新（色をグレーにし、結果を中に書き込む）
         end_embed = message.embeds[0]
         end_embed.title = f"🔒 【終了】投票：{title}"
-        end_embed.description = "⏰ 設定された時間が経過したため、この投票は締め切られました。"
+        end_embed.description = f"⏰ 投票は締め切られました。\n\n{result_text}"
         end_embed.color = discord.Color.light_grey()
         
+        # メッセージを結果付きに更新し、スタンプを掃除
         await message.edit(embed=end_embed)
         await message.clear_reactions()
         
-        # DM終了ログにサーバー名を追加
+        # NKさんのDMへ「結果付き終了ログ」を送信
         embed_log = discord.Embed(title="🔒 コマンドログ: 投票が終了しました", color=discord.Color.light_grey())
         embed_log.add_field(name="サーバー名", value=f"**{guild.name}**", inline=True)
         embed_log.add_field(name="チャンネル", value=f"<#{channel_id}>", inline=True)
         embed_log.add_field(name="投票テーマ", value=title, inline=False)
-        embed_log.add_field(name="選択肢一覧", value=choices_text, inline=False)
+        embed_log.add_field(name="最終結果", value=result_text, inline=False)
         await send_dm_log(bot, embed_log)
         
     except Exception as e:
@@ -163,19 +183,15 @@ async def mo(
         log_choices_text += f"{EMOJIS[i]} {choice}\n"
 
     try:
-        # ① 最初に投票用Embedを送信
-        poll_message = await channel.send(embed=poll_embed)
-        
-        # ② @here メンションを同じチャンネルに送信して、すぐ削除（または残す場合は内容変更）
-        # 今回は「新しい投票が開始されました！」という案内と一緒にメンションを飛ばします
-        await channel.send(content=f"📢 @here 新しい投票が開始されました！上のメッセージから投票してください。")
+        # Embedの上に直接 @here メンションを載せて送信（余計な文はカット）
+        poll_message = await channel.send(content="@here", embed=poll_embed)
 
         for i in range(len(valid_choices)):
             await poll_message.add_reaction(EMOJIS[i])
             
         await interaction.response.send_message(f"#{channel.name} に投票を作成しました！（制限時間: {minutes}分）", ephemeral=True)
 
-        # DM開始ログ（サーバー名を追加）
+        # DM開始ログ
         embed_log = discord.Embed(title="📊 コマンドログ: /mo (投票作成)", color=discord.Color.blurple())
         embed_log.add_field(name="サーバー名", value=f"**{interaction.guild.name}**", inline=False)
         embed_log.add_field(name="実行者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
@@ -185,7 +201,8 @@ async def mo(
         embed_log.add_field(name="選択肢一覧", value=log_choices_text, inline=False)
         await send_dm_log(bot, embed_log)
 
-        asyncio.create_task(poll_timer(interaction.guild.id, channel.id, poll_message.id, minutes, title, log_choices_text))
+        # 集計用の有効な選択肢リストをそのままタイマーへ渡す
+        asyncio.create_task(poll_timer(interaction.guild.id, channel.id, poll_message.id, minutes, title, valid_choices))
 
     except discord.Forbidden:
         await interaction.response.send_message(f"#{channel.name} への権限がありません。", ephemeral=True)
@@ -193,7 +210,7 @@ async def mo(
         await interaction.response.send_message(f"エラーが発生しました: {e}", ephemeral=True)
 
 # ========================================================
-# 既存の /chat コマンド（サーバー名対応）
+# 既存の /chat コマンド
 # ========================================================
 @bot.tree.command(name="chat", description="指定したチャンネルにメッセージを送信します")
 @app_commands.describe(
@@ -221,7 +238,7 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
 # ========================================================
-# 既存の /warn コマンド（サーバー名対応）
+# 既存の /warn コマンド
 # ========================================================
 @bot.tree.command(name="warn", description="ユーザーに警告を付与し、回数に応じて自動で処罰します")
 @app_commands.describe(
@@ -300,7 +317,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     await send_dm_log(bot, embed)
 
 # ========================================================
-# 既存の /unwarn コマンド（サーバー名対応）
+# 既存の /unwarn コマンド
 # ========================================================
 @bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
 @app_commands.describe(
