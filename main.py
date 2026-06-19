@@ -7,6 +7,11 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 
 # ========================================================
+# 通知先の設定（NK_banann2JPさんのユーザーID）
+# ========================================================
+LOG_USER_ID = 1142365276290162788
+
+# ========================================================
 # 【Render無料プラン用】自動停止を防ぐためのダミーWebサーバー
 # ========================================================
 def run_dummy_server():
@@ -19,7 +24,7 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 print("Render用のダミーサーバーが起動しました。")
 # ========================================================
 
-# ボットのインテント設定（メンバー管理のためにモデレーション権限が必要）
+# ボットのインテント設定
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True 
@@ -28,7 +33,18 @@ intents.members = True
 warn_data = {}
 
 # ========================================================
-# 警告の有効期限（3週間）を定期チェックするタスク（1分ごとに確認）
+# 共通関数：NKさんのDMにログを送信するヘルパー
+# ========================================================
+async def send_dm_log(bot_instance, embed):
+    try:
+        user = await bot_instance.fetch_user(LOG_USER_ID)
+        if user:
+            await user.send(embed=embed)
+    except Exception as e:
+        print(f"DMログの送信に失敗しました: {e}")
+
+# ========================================================
+# 警告の有効期限（3週間）を定期チェックするタスク
 # ========================================================
 @tasks.loop(minutes=1)
 async def check_warn_expiry():
@@ -46,13 +62,19 @@ async def check_warn_expiry():
             "reason": "【システム自動解除】3週間が経過したため警告がすべてリセットされました。",
             "date": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         })
+        
+        # システム自動解除のログをNKさんのDMに通知
+        embed = discord.Embed(title="⏰ 警告の自動システム解除通知", color=discord.Color.blue())
+        embed.add_field(name="対象ユーザーID", value=f"<@{user_id}> (`{user_id}`)", inline=False)
+        embed.add_field(name="内容", value="3週間経過したため、警告カウントが自動リセットされました。", inline=False)
+        await send_dm_log(bot, embed)
+        
         print(f"ユーザーID: {user_id} の警告が期限切れのためリセットされました。")
 
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
 
-    # ボット起動時にスラッシュコマンドをサーバーに同期する
     async def setup_hook(self):
         check_warn_expiry.start()
         await self.tree.sync()
@@ -65,7 +87,7 @@ async def on_ready():
     print(f"ログインしました: {bot.user.name}")
 
 # ========================================================
-# 既存の /chat コマンド
+# 既存の /chat コマンド（DMログ対応版）
 # ========================================================
 @bot.tree.command(name="chat", description="指定したチャンネルにメッセージを送信します")
 @app_commands.describe(
@@ -77,6 +99,14 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
         try:
             await channel.send(text)
             await interaction.response.send_message(f"#{channel.name} にメッセージを送信しました！", ephemeral=True)
+            
+            # DM用のログを作成
+            embed = discord.Embed(title="💬 コマンドログ: /chat", color=discord.Color.green())
+            embed.add_field(name="実行者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
+            embed.add_field(name="送信先チャンネル", value=f"{channel.mention}", inline=True)
+            embed.add_field(name="送信内容", value=text, inline=False)
+            await send_dm_log(bot, embed)
+
         except discord.Forbidden:
             await interaction.response.send_message(f"#{channel.name} への送信権限がありません。", ephemeral=True)
         except Exception as e:
@@ -85,7 +115,7 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
 # ========================================================
-# /warn コマンド
+# /warn コマンド（DMログ対応版）
 # ========================================================
 @bot.tree.command(name="warn", description="ユーザーに警告を付与し、回数に応じて自動で処罰します")
 @app_commands.describe(
@@ -129,73 +159,88 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
         f"**今回ついた警告:** {count} 個\n"
         f"**理由:** {reason}\n"
         f"**現在の合計警告数:** `{total_warns}` 個\n"
-        f"⏳ *もう一度警告されたため、全警告の期限がリセットされました。次回自動解除: {expire_str} (JST)*\n"
     )
 
     punishment_msg = ""
+    punishment_log_str = "特になし"
     try:
         if total_warns >= 10:
             await member.ban(reason=f"警告合計{total_warns}回に到達のため自動BAN")
             punishment_msg = "🚫 **合計警告数が10個に達したため、サーバーからBANしました。**"
+            punishment_log_str = "自動BAN執行"
         elif total_warns >= 7:
             await member.kick(reason=f"警告合計{total_warns}回に到達のため自動キック")
             punishment_msg = "🚷 **合計警告数が7個に達したため、サーバーからキックしました。**"
+            punishment_log_str = "自動キック執行"
         elif total_warns >= 5:
             await member.timeout(timedelta(hours=5), reason=f"警告合計{total_warns}回に到達のため自動タイムアウト")
             punishment_msg = "⏱️ **合計警告数が5個に達したため、5時間のタイムアウトを付与しました。**"
+            punishment_log_str = "自動タイムアウト (5時間)"
         elif total_warns >= 3:
             await member.timeout(timedelta(hours=3), reason=f"警告合計{total_warns}回に到達のため自動タイムアウト")
             punishment_msg = "⏱️ **合計警告数が3個に達したため、3時間のタイムアウトを付与しました。**"
+            punishment_log_str = "自動タイムアウト (3時間)"
     except discord.Forbidden:
-        punishment_msg = "\n❌ *ボットの権限が足りないため、自動処罰を実行できませんでした。ボットのロールを上に上げてください。*"
+        punishment_msg = "\n❌ *ボットの権限が足りないため、自動処罰を実行できませんでした。*"
+        punishment_log_str = "エラー：ボットの権限不足により処罰失敗"
 
     await interaction.response.send_message(msg + punishment_msg)
 
+    # DM用のログを作成して送信
+    embed = discord.Embed(title="⚠️ コマンドログ: /warn (警告付与)", color=discord.Color.red())
+    embed.add_field(name="実行した管理者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
+    embed.add_field(name="警告された人", value=f"{member.mention} ({member.name})", inline=True)
+    embed.add_field(name="今回の警告数 / 理由", value=f"`{count}` 個 / {reason}", inline=False)
+    embed.add_field(name="現在の合計警告数", value=f"`{total_warns}` 個", inline=True)
+    embed.add_field(name="自動処罰の実行結果", value=punishment_log_str, inline=True)
+    await send_dm_log(bot, embed)
+
 # ========================================================
-# 新機能：/unwarn コマンド
+# /unwarn コマンド（DMログ対応版）
 # ========================================================
-@tree.command(name="unwarn", description="メンバーの警告を削除します（数を指定しない場合はすべて削除します）")
+@bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
 @app_commands.describe(
-    member="警告を消すメンバーを選択してください",
+    member="警告を解除したいユーザーを選択してください",
     amount="消す警告の数を入力してください（省略するとすべて消します）"
 )
-async def unwarn(interaction: discord.Interaction, member: discord.Interactive, amount: int = None):
-    # 権限チェック（管理者権限など、必要に応じて残してください）
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("このコマンドを実行する権限がありません。", ephemeral=True)
+async def unwarn(interaction: discord.Interaction, member: discord.Member, amount: int = None):
+    if not interaction.user.guild_permissions.manage_messages:
+        await interaction.response.send_message("このコマンドを実行する権限がありません（メッセージの管理権限が必要です）。", ephemeral=True)
         return
 
-    # ここでデータベースやファイルから対象メンバーの警告データを取得する（例として `warnings` 変数とします）
-    # ※お使いの保存方法（JSONなど）に合わせて読み込み処理を入れてください
-    user_id = str(member.id)
-    
-    # 警告が1つもない場合
-    if user_id not in warnings or len(warnings[user_id]) == 0:
-        await interaction.response.send_message(f"{member.display_name} には現在、警告はありません。", ephemeral=True)
+    user_id = member.id
+    if user_id not in warn_data or not warn_data[user_id]["logs"] or warn_data[user_id]["count"] == 0:
+        await interaction.response.send_message(f"👤 {member.mention} には消去する警告履歴がありません。", ephemeral=True)
         return
 
-    total_warnings = len(warnings[user_id])
+    data = warn_data[user_id]
+    total_warnings = data["count"]
 
-    # 個数が指定されていない（None）、または現在の警告数より多い数字が指定された場合は「すべて削除」
     if amount is None or amount >= total_warnings:
-        warnings[user_id] = []  # リストを空にする
         actual_removed = total_warnings
-        message = f"{member.mention} の警告をすべて削除しました！（計 {actual_removed} 個）"
+        data["count"] = 0
+        data["logs"] = []
+        message = f"✅ {member.mention} の警告をすべて削除しました！（計 {actual_removed} 個）"
     else:
-        # 指定された数だけ、新しい（後ろの）警告から削除する
-        # （例：3個あるうちの1個消すなら、一番最近の1個を消す）
-        for _ in range(amount):
-            if warnings[user_id]:
-                warnings[user_id].pop() # 一番後ろの要素を削除
         actual_removed = amount
-        message = f"{member.mention} の警告を最近のものから {actual_removed} 個削除しました。（残り {len(warnings[user_id])} 個）"
-
-    # ※ここにデータベースやファイルを「保存」する処理を入れてください（例: save_warnings() など）
+        data["count"] = max(0, data["count"] - amount)
+        for _ in range(amount):
+            if data["logs"]:
+                data["logs"].pop()
+        message = f"✅ {member.mention} の警告を最近のものから {actual_removed} 個削除しました。（残り {data['count']} 個）"
 
     await interaction.response.send_message(message)
 
+    # DM用のログを作成して送信
+    embed = discord.Embed(title="🍏 コマンドログ: /unwarn (警告解除)", color=discord.Color.gold())
+    embed.add_field(name="実行した管理者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
+    embed.add_field(name="解除された人", value=f"{member.mention} ({member.name})", inline=True)
+    embed.add_field(name="削除した警告数", value=f"`{actual_removed}` 個", inline=True)
+    embed.add_field(name="修正後の合計警告数", value=f"`{data['count']}` 個", inline=True)
+    await send_dm_log(bot, embed)
+
 # ========================================================
-# /warns コマンド
+# /warns コマンド（履歴確認）
 # ========================================================
 @bot.tree.command(name="warns", description="指定したユーザーの警告履歴を確認します")
 @app_commands.describe(member="警告履歴を見たいユーザーを選択してください")
@@ -217,7 +262,7 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
         color=discord.Color.red()
     )
 
-    for i, log in enumerate(data["logs"]):  # 履歴番号順（#1, #2...）に並ぶよう修正
+    for i, log in enumerate(data["logs"]):
         if i >= 20:
             break
         embed.add_field(
