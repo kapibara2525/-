@@ -87,30 +87,29 @@ async def on_ready():
     print(f"ログインしました: {bot.user.name}")
 
 # ========================================================
-# 改良機能：/mo コマンド（制限時間・DM通知・順番変更版）
+# 改良機能：/mo コマンド（@hereメンション・サーバー名対応）
 # ========================================================
 EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
-# バックグラウンドで投票の終了を待つタイマー処理
-async def poll_timer(channel_id, message_id, minutes, title, choices_text):
-    await asyncio.sleep(minutes * 60) # 指定された「分」の数だけ待機
+async def poll_timer(guild_id, channel_id, message_id, minutes, title, choices_text):
+    await asyncio.sleep(minutes * 60)
     try:
+        guild = bot.get_guild(guild_id) or await bot.fetch_guild(guild_id)
         channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
         message = await channel.fetch_message(message_id)
         
-        # 投票完了時のEmbedを作成（色をグレーに変更）
         end_embed = message.embeds[0]
         end_embed.title = f"🔒 【終了】投票：{title}"
         end_embed.description = "⏰ 設定された時間が経過したため、この投票は締め切られました。"
         end_embed.color = discord.Color.light_grey()
         
-        # 投票メッセージを更新して、ついているリアクションをすべて削除
         await message.edit(embed=end_embed)
         await message.clear_reactions()
         
-        # NKさんのDMへ終了のログを送信
+        # DM終了ログにサーバー名を追加
         embed_log = discord.Embed(title="🔒 コマンドログ: 投票が終了しました", color=discord.Color.light_grey())
-        embed_log.add_field(name="投票が行われたチャンネル", value=f"<#{channel_id}>", inline=True)
+        embed_log.add_field(name="サーバー名", value=f"**{guild.name}**", inline=True)
+        embed_log.add_field(name="チャンネル", value=f"<#{channel_id}>", inline=True)
         embed_log.add_field(name="投票テーマ", value=title, inline=False)
         embed_log.add_field(name="選択肢一覧", value=choices_text, inline=False)
         await send_dm_log(bot, embed_log)
@@ -151,10 +150,9 @@ async def mo(
     raw_choices = [choice1, choice2, choice3, choice4, choice5]
     valid_choices = [c for c in raw_choices if c is not None]
 
-    # 投票用Embedを作成
     poll_embed = discord.Embed(
         title=f"📊 投票：{title}",
-        description=f"⏱️ 制限時間: **{minutes}分** (時間が来ると自動で締め切られます)\n下のリアクションを押して投票してください！",
+        description=f"⏱️ 制限時間: **{minutes}分**\n下のリアクションを押して投票してください！",
         color=discord.Color.blurple()
     )
     poll_embed.set_footer(text=f"投票作成者: {interaction.user.name}")
@@ -165,15 +163,21 @@ async def mo(
         log_choices_text += f"{EMOJIS[i]} {choice}\n"
 
     try:
+        # ① 最初に投票用Embedを送信
         poll_message = await channel.send(embed=poll_embed)
         
+        # ② @here メンションを同じチャンネルに送信して、すぐ削除（または残す場合は内容変更）
+        # 今回は「新しい投票が開始されました！」という案内と一緒にメンションを飛ばします
+        await channel.send(content=f"📢 @here 新しい投票が開始されました！上のメッセージから投票してください。")
+
         for i in range(len(valid_choices)):
             await poll_message.add_reaction(EMOJIS[i])
             
         await interaction.response.send_message(f"#{channel.name} に投票を作成しました！（制限時間: {minutes}分）", ephemeral=True)
 
-        # NKさんのDMへ開始ログを送信
+        # DM開始ログ（サーバー名を追加）
         embed_log = discord.Embed(title="📊 コマンドログ: /mo (投票作成)", color=discord.Color.blurple())
+        embed_log.add_field(name="サーバー名", value=f"**{interaction.guild.name}**", inline=False)
         embed_log.add_field(name="実行者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
         embed_log.add_field(name="送信先チャンネル", value=f"{channel.mention}", inline=True)
         embed_log.add_field(name="制限時間", value=f"{minutes} 分", inline=True)
@@ -181,8 +185,7 @@ async def mo(
         embed_log.add_field(name="選択肢一覧", value=log_choices_text, inline=False)
         await send_dm_log(bot, embed_log)
 
-        # 非同期タイマーを裏側で起動
-        asyncio.create_task(poll_timer(channel.id, poll_message.id, minutes, title, log_choices_text))
+        asyncio.create_task(poll_timer(interaction.guild.id, channel.id, poll_message.id, minutes, title, log_choices_text))
 
     except discord.Forbidden:
         await interaction.response.send_message(f"#{channel.name} への権限がありません。", ephemeral=True)
@@ -190,7 +193,7 @@ async def mo(
         await interaction.response.send_message(f"エラーが発生しました: {e}", ephemeral=True)
 
 # ========================================================
-# 既存の /chat コマンド
+# 既存の /chat コマンド（サーバー名対応）
 # ========================================================
 @bot.tree.command(name="chat", description="指定したチャンネルにメッセージを送信します")
 @app_commands.describe(
@@ -204,6 +207,7 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
             await interaction.response.send_message(f"#{channel.name} にメッセージを送信しました！", ephemeral=True)
             
             embed = discord.Embed(title="💬 コマンドログ: /chat", color=discord.Color.green())
+            embed.add_field(name="サーバー名", value=f"**{interaction.guild.name}**", inline=False)
             embed.add_field(name="実行者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
             embed.add_field(name="送信先チャンネル", value=f"{channel.mention}", inline=True)
             embed.add_field(name="送信内容", value=text, inline=False)
@@ -217,7 +221,7 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
 # ========================================================
-# 既存の /warn コマンド
+# 既存の /warn コマンド（サーバー名対応）
 # ========================================================
 @bot.tree.command(name="warn", description="ユーザーに警告を付与し、回数に応じて自動で処罰します")
 @app_commands.describe(
@@ -287,6 +291,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     await interaction.response.send_message(msg + punishment_msg)
 
     embed = discord.Embed(title="⚠️ コマンドログ: /warn (警告付与)", color=discord.Color.red())
+    embed.add_field(name="サーバー名", value=f"**{interaction.guild.name}**", inline=False)
     embed.add_field(name="実行した管理者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
     embed.add_field(name="警告された人", value=f"{member.mention} ({member.name})", inline=True)
     embed.add_field(name="今回の警告数 / 理由", value=f"`{count}` 個 / {reason}", inline=False)
@@ -295,7 +300,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     await send_dm_log(bot, embed)
 
 # ========================================================
-# 既存の /unwarn コマンド
+# 既存の /unwarn コマンド（サーバー名対応）
 # ========================================================
 @bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
 @app_commands.describe(
@@ -331,6 +336,7 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member, amoun
     await interaction.response.send_message(message)
 
     embed = discord.Embed(title="🍏 コマンドログ: /unwarn (警告解除)", color=discord.Color.gold())
+    embed.add_field(name="サーバー名", value=f"**{interaction.guild.name}**", inline=False)
     embed.add_field(name="実行した管理者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
     embed.add_field(name="解除された人", value=f"{member.mention} ({member.name})", inline=True)
     embed.add_field(name="削除した警告数", value=f"`{actual_removed}` 個", inline=True)
