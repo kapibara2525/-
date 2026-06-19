@@ -2,6 +2,7 @@ import os
 import http.server
 import threading
 import discord
+import asyncio
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
@@ -63,7 +64,6 @@ async def check_warn_expiry():
             "date": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         })
         
-        # システム自動解除のログをNKさんのDMに通知
         embed = discord.Embed(title="⏰ 警告の自動システム解除通知", color=discord.Color.blue())
         embed.add_field(name="対象ユーザーID", value=f"<@{user_id}> (`{user_id}`)", inline=False)
         embed.add_field(name="内容", value="3週間経過したため、警告カウントが自動リセットされました。", inline=False)
@@ -87,7 +87,110 @@ async def on_ready():
     print(f"ログインしました: {bot.user.name}")
 
 # ========================================================
-# 既存の /chat コマンド（DMログ対応版）
+# 改良機能：/mo コマンド（制限時間・DM通知・順番変更版）
+# ========================================================
+EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+# バックグラウンドで投票の終了を待つタイマー処理
+async def poll_timer(channel_id, message_id, minutes, title, choices_text):
+    await asyncio.sleep(minutes * 60) # 指定された「分」の数だけ待機
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+        
+        # 投票完了時のEmbedを作成（色をグレーに変更）
+        end_embed = message.embeds[0]
+        end_embed.title = f"🔒 【終了】投票：{title}"
+        end_embed.description = "⏰ 設定された時間が経過したため、この投票は締め切られました。"
+        end_embed.color = discord.Color.light_grey()
+        
+        # 投票メッセージを更新して、ついているリアクションをすべて削除
+        await message.edit(embed=end_embed)
+        await message.clear_reactions()
+        
+        # NKさんのDMへ終了のログを送信
+        embed_log = discord.Embed(title="🔒 コマンドログ: 投票が終了しました", color=discord.Color.light_grey())
+        embed_log.add_field(name="投票が行われたチャンネル", value=f"<#{channel_id}>", inline=True)
+        embed_log.add_field(name="投票テーマ", value=title, inline=False)
+        embed_log.add_field(name="選択肢一覧", value=choices_text, inline=False)
+        await send_dm_log(bot, embed_log)
+        
+    except Exception as e:
+        print(f"投票の自動締め切り処理でエラーが発生しました: {e}")
+
+@bot.tree.command(name="mo", description="指定したチャンネルに時間制限付きの投票を作成します")
+@app_commands.describe(
+    channel="投票を出したいチャンネルを選択してください",
+    title="投票の本文（タイトル）を入力してください",
+    minutes="投票の制限時間を【分】で入力してください（例: 5）",
+    choice1="選択肢1（必須）",
+    choice2="選択肢2（必須）",
+    choice3="選択肢3（任意）",
+    choice4="選択肢4（任意）",
+    choice5="選択肢5（任意）"
+)
+async def mo(
+    interaction: discord.Interaction, 
+    channel: discord.TextChannel, 
+    title: str, 
+    minutes: int,
+    choice1: str, 
+    choice2: str, 
+    choice3: str = None, 
+    choice4: str = None, 
+    choice5: str = None
+):
+    if not interaction.user.guild_permissions.manage_messages:
+        await interaction.response.send_message("このコマンドを実行する権限がありません（メッセージの管理権限が必要です）。", ephemeral=True)
+        return
+
+    if minutes <= 0:
+        await interaction.response.send_message("時間は1分以上で指定してください。", ephemeral=True)
+        return
+
+    raw_choices = [choice1, choice2, choice3, choice4, choice5]
+    valid_choices = [c for c in raw_choices if c is not None]
+
+    # 投票用Embedを作成
+    poll_embed = discord.Embed(
+        title=f"📊 投票：{title}",
+        description=f"⏱️ 制限時間: **{minutes}分** (時間が来ると自動で締め切られます)\n下のリアクションを押して投票してください！",
+        color=discord.Color.blurple()
+    )
+    poll_embed.set_footer(text=f"投票作成者: {interaction.user.name}")
+
+    log_choices_text = ""
+    for i, choice in enumerate(valid_choices):
+        poll_embed.add_field(name=f"{EMOJIS[i]} {choice}", value=" ", inline=False)
+        log_choices_text += f"{EMOJIS[i]} {choice}\n"
+
+    try:
+        poll_message = await channel.send(embed=poll_embed)
+        
+        for i in range(len(valid_choices)):
+            await poll_message.add_reaction(EMOJIS[i])
+            
+        await interaction.response.send_message(f"#{channel.name} に投票を作成しました！（制限時間: {minutes}分）", ephemeral=True)
+
+        # NKさんのDMへ開始ログを送信
+        embed_log = discord.Embed(title="📊 コマンドログ: /mo (投票作成)", color=discord.Color.blurple())
+        embed_log.add_field(name="実行者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
+        embed_log.add_field(name="送信先チャンネル", value=f"{channel.mention}", inline=True)
+        embed_log.add_field(name="制限時間", value=f"{minutes} 分", inline=True)
+        embed_log.add_field(name="投票テーマ", value=title, inline=False)
+        embed_log.add_field(name="選択肢一覧", value=log_choices_text, inline=False)
+        await send_dm_log(bot, embed_log)
+
+        # 非同期タイマーを裏側で起動
+        asyncio.create_task(poll_timer(channel.id, poll_message.id, minutes, title, log_choices_text))
+
+    except discord.Forbidden:
+        await interaction.response.send_message(f"#{channel.name} への権限がありません。", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"エラーが発生しました: {e}", ephemeral=True)
+
+# ========================================================
+# 既存の /chat コマンド
 # ========================================================
 @bot.tree.command(name="chat", description="指定したチャンネルにメッセージを送信します")
 @app_commands.describe(
@@ -100,7 +203,6 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
             await channel.send(text)
             await interaction.response.send_message(f"#{channel.name} にメッセージを送信しました！", ephemeral=True)
             
-            # DM用のログを作成
             embed = discord.Embed(title="💬 コマンドログ: /chat", color=discord.Color.green())
             embed.add_field(name="実行者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
             embed.add_field(name="送信先チャンネル", value=f"{channel.mention}", inline=True)
@@ -115,7 +217,7 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
 # ========================================================
-# /warn コマンド（DMログ対応版）
+# 既存の /warn コマンド
 # ========================================================
 @bot.tree.command(name="warn", description="ユーザーに警告を付与し、回数に応じて自動で処罰します")
 @app_commands.describe(
@@ -150,8 +252,6 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     })
 
     total_warns = warn_data[user_id]["count"]
-    expire_jst = new_expire_at + timedelta(hours=9)
-    expire_str = expire_jst.strftime('%Y-%m-%d %H:%M:%S')
 
     msg = (
         f"⚠️ **ユーザーに警告を与えました**\n"
@@ -186,7 +286,6 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
 
     await interaction.response.send_message(msg + punishment_msg)
 
-    # DM用のログを作成して送信
     embed = discord.Embed(title="⚠️ コマンドログ: /warn (警告付与)", color=discord.Color.red())
     embed.add_field(name="実行した管理者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
     embed.add_field(name="警告された人", value=f"{member.mention} ({member.name})", inline=True)
@@ -196,7 +295,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     await send_dm_log(bot, embed)
 
 # ========================================================
-# /unwarn コマンド（DMログ対応版）
+# 既存の /unwarn コマンド
 # ========================================================
 @bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
 @app_commands.describe(
@@ -231,7 +330,6 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member, amoun
 
     await interaction.response.send_message(message)
 
-    # DM用のログを作成して送信
     embed = discord.Embed(title="🍏 コマンドログ: /unwarn (警告解除)", color=discord.Color.gold())
     embed.add_field(name="実行した管理者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
     embed.add_field(name="解除された人", value=f"{member.mention} ({member.name})", inline=True)
@@ -240,7 +338,7 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member, amoun
     await send_dm_log(bot, embed)
 
 # ========================================================
-# /warns コマンド（履歴確認）
+# 既存の /warns コマンド
 # ========================================================
 @bot.tree.command(name="warns", description="指定したユーザーの警告履歴を確認します")
 @app_commands.describe(member="警告履歴を見たいユーザーを選択してください")
