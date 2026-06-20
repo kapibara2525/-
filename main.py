@@ -87,7 +87,7 @@ async def on_ready():
     print(f"ログインしました: {bot.user.name}")
 
 # ========================================================
-# 改良機能：/mo コマンド（結果自動集計・@hereスッキリ版）
+# 改良機能：/mo コマンド（投票者内訳の表示機能付き）
 # ========================================================
 EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
@@ -98,40 +98,50 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
         message = await channel.fetch_message(message_id)
         
-        # リアクションを集計する
         results = []
         total_votes = 0
         
         for i, choice in enumerate(valid_choices):
-            # メッセージについている特定の絵文字のリアクションを探す
             reaction = discord.utils.get(message.reactions, emoji=EMOJIS[i])
-            # ボット自身が最初につけた1票を引く（純粋な投票数にする）
-            count = (reaction.count - 1) if reaction else 0
-            results.append((choice, count))
-            total_votes += count
+            voters = []
             
-        # 結果発表用のテキストを作成
+            if reaction:
+                # リアクションしたユーザー一覧をすべて取得
+                async for user in reaction.users():
+                    # ボット自身の初期リアクションは除外
+                    if user.id != bot.user.id:
+                        voters.append(user.mention) # メンション形式で保存
+            
+            vote_count = len(voters)
+            results.append((choice, vote_count, voters))
+            total_votes += vote_count
+            
+        # 結果発表用テキストの構築
         result_text = "ーー 【集計結果】 ーー\n"
-        for i, (choice, count) in enumerate(results):
-            result_text += f"{EMOJIS[i]} **{choice}**: `{count}` 票\n"
+        for i, (choice, count, voters) in enumerate(results):
+            if count > 0:
+                voters_str = ", ".join(voters)
+                result_text += f"{EMOJIS[i]} **{choice}**: `{count}` 票\n└ 投票者: {voters_str}\n"
+            else:
+                result_text += f"{EMOJIS[i]} **{choice}**: `0` 票\n└ 投票者: なし\n"
+                
         result_text += f"\n総投票数: `{total_votes}` 票"
 
-        # 投票完了時のEmbedを更新（色をグレーにし、結果を中に書き込む）
+        # 投票用Embedをグレーにして結果を上書き
         end_embed = message.embeds[0]
         end_embed.title = f"🔒 【終了】投票：{title}"
         end_embed.description = f"⏰ 投票は締め切られました。\n\n{result_text}"
         end_embed.color = discord.Color.light_grey()
         
-        # メッセージを結果付きに更新し、スタンプを掃除
         await message.edit(embed=end_embed)
         await message.clear_reactions()
         
-        # NKさんのDMへ「結果付き終了ログ」を送信
+        # NKさんのDMへ送信するログ
         embed_log = discord.Embed(title="🔒 コマンドログ: 投票が終了しました", color=discord.Color.light_grey())
         embed_log.add_field(name="サーバー名", value=f"**{guild.name}**", inline=True)
         embed_log.add_field(name="チャンネル", value=f"<#{channel_id}>", inline=True)
         embed_log.add_field(name="投票テーマ", value=title, inline=False)
-        embed_log.add_field(name="最終結果", value=result_text, inline=False)
+        embed_log.add_field(name="最終結果と投票者内訳", value=result_text, inline=False)
         await send_dm_log(bot, embed_log)
         
     except Exception as e:
@@ -183,7 +193,6 @@ async def mo(
         log_choices_text += f"{EMOJIS[i]} {choice}\n"
 
     try:
-        # Embedの上に直接 @here メンションを載せて送信（余計な文はカット）
         poll_message = await channel.send(content="@here", embed=poll_embed)
 
         for i in range(len(valid_choices)):
@@ -201,7 +210,6 @@ async def mo(
         embed_log.add_field(name="選択肢一覧", value=log_choices_text, inline=False)
         await send_dm_log(bot, embed_log)
 
-        # 集計用の有効な選択肢リストをそのままタイマーへ渡す
         asyncio.create_task(poll_timer(interaction.guild.id, channel.id, poll_message.id, minutes, title, valid_choices))
 
     except discord.Forbidden:
