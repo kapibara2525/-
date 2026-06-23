@@ -131,16 +131,12 @@ async def check_and_update_level_roles(member, level):
     target_lvl = should_have_role(level)
     role_name_prefix = "Level "
     
-    # サーバー内の全「Level ○○」ロールを探す
-    existing_level_roles = [r for r in member.guild.roles if r.name.startswith(role_name_prefix)]
-    
-    # 付与すべきロール
     target_role = None
     if target_lvl is not None:
         target_role_name = f"{role_name_prefix}{target_lvl}"
         target_role = discord.utils.get(member.guild.roles, name=target_role_name)
         
-        # ロールがサーバーになければ自動作成
+        # ロールがなければ自動作成を試みる
         if not target_role:
             try:
                 target_role = await member.guild.create_role(name=target_role_name, color=discord.Color.green(), reason="レベルシステムによる自動作成")
@@ -148,12 +144,10 @@ async def check_and_update_level_roles(member, level):
                 print(f"ロールの作成権限がありません: {target_role_name}")
                 return
 
-    # 適切なロールの付け替え
     try:
         if target_role and target_role not in member.roles:
             await member.add_roles(target_role)
         
-        # 古くなった他のレベルロールを外す
         for r in member.roles:
             if r.name.startswith(role_name_prefix) and (target_role is None or r.id != target_role.id):
                 await member.remove_roles(r)
@@ -161,7 +155,7 @@ async def check_and_update_level_roles(member, level):
         print(f"メンバー {member.name} へのロール操作権限が不足しています。")
 
 async def add_xp(member, amount):
-    """XPを加算し、レベルアップ処理を行う（チャット通知は完全削除）"""
+    """XPを加算し、レベルアップ処理を行う"""
     global xp_enabled
     if not xp_enabled:
         return
@@ -173,7 +167,6 @@ async def add_xp(member, amount):
     current_level = xp_data[user_id]["level"]
     current_xp = xp_data[user_id]["xp"] + amount
 
-    # 最大レベル500の制限
     if current_level >= 500:
         xp_data[user_id]["xp"] = 0
         xp_data[user_id]["level"] = 500
@@ -205,7 +198,6 @@ async def on_message(message):
     if message.author.bot or not message.guild:
         return
 
-    # チャットでのXP獲得（1分間のクールダウン連投対策）
     user_id = message.author.id
     now = datetime.now(timezone.utc)
     if user_id not in last_xp_time or now - last_xp_time[user_id] > timedelta(minutes=1):
@@ -226,22 +218,73 @@ async def on_member_join(member):
 async def on_raw_reaction_add(payload):
     if payload.user_id == bot.user.id or not payload.guild_id:
         return
-    
     guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-        
+    if not guild: return
     member = payload.member
-    if not member or member.bot:
-        return
+    if not member or member.bot: return
 
-    # リアクションでのXP獲得 (2〜5 XP)
     xp_to_add = random.randint(2, 5)
     await add_xp(member, xp_to_add)
 
 # ========================================================
 # レベルシステム関連のスラッシュコマンド
 # ========================================================
+
+@bot.tree.command(name="rolecreate", description="レベルシステム用（5〜500レベ）の全ロールを自動で一括作成します")
+async def rolecreate(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_roles:
+        await interaction.response.send_message("このコマンドを実行する権限（ロール管理権限）がありません。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True) # 処理に時間がかかるので保留状態にする
+
+    # 生成すべきレベルリストの算出
+    levels_to_create = []
+    # 5〜95レベ (5ごと)
+    for l in range(5, 100, 5):
+        levels_to_create.append(l)
+    # 100〜190レベ (10ごと)
+    for l in range(100, 200, 10):
+        levels_to_create.append(l)
+    # 200〜500レベ (50ごと)
+    for l in range(200, 501, 50):
+        levels_to_create.append(l)
+
+    created_count = 0
+    skipped_count = 0
+
+    try:
+        for lvl in levels_to_create:
+            role_name = f"Level {lvl}"
+            # 既に同じ名前のロールがあるか確認
+            existing_role = discord.utils.get(interaction.guild.roles, name=role_name)
+            
+            if not existing_role:
+                # ロールを作成 (色は見やすい緑系)
+                await interaction.guild.create_role(
+                    name=role_name, 
+                    color=discord.Color.from_rgb(46, 204, 113), 
+                    reason="レベルシステム一括初期作成"
+                )
+                created_count += 1
+                await asyncio.sleep(0.5) # Discordのレートリミット（連投制限）対策
+            else:
+                skipped_count += 1
+
+        status_msg = f"✅ ロールの作成が完了しました！\n・新しく作成したロール: `{created_count}` 個\n・既に存在したためスキップ: `{skipped_count}` 個"
+        await interaction.followup.send(status_msg)
+
+        # ログ通知
+        embed = discord.Embed(title="🛠️ コマンドログ: /rolecreate 実行", color=discord.Color.blue())
+        embed.add_field(name="サーバー名", value=interaction.guild.name, inline=True)
+        embed.add_field(name="実行者", value=interaction.user.mention, inline=True)
+        embed.add_field(name="結果", value=f"作成: {created_count}個 / スキップ: {skipped_count}個", inline=False)
+        await send_channel_log(bot, embed)
+
+    except discord.Forbidden:
+        await interaction.followup.send("❌ ボットに「ロールの管理」権限が付与されていないか、権限が不足しているため作成に失敗しました。")
+    except Exception as e:
+        await interaction.followup.send(f"❌ エラーが発生しました: {e}")
 
 @bot.tree.command(name="xpmode", description="レベル・XP機能の有効/無効を切り替えます")
 @app_commands.describe(mode="オンにする場合は on、オフにする場合は off を選択してください")
@@ -265,7 +308,6 @@ async def xpmode(interaction: discord.Interaction, mode: str):
     save_all_data()
     await interaction.response.send_message(f"⚙️ レベル・XPシステムを **{status_text}** に設定しました。")
     
-    # ログ通知
     embed = discord.Embed(title="⚙️ コマンドログ: /xpmode 設定変更", color=discord.Color.orange())
     embed.add_field(name="サーバー名", value=interaction.guild.name, inline=True)
     embed.add_field(name="実行者", value=interaction.user.mention, inline=True)
@@ -317,11 +359,8 @@ async def levelset(interaction: discord.Interaction, member: discord.Member, tar
     save_all_data()
 
     await check_and_update_level_roles(member, target_level)
-
-    # コマンドの応答（シンプルなテキスト応答）
     await interaction.response.send_message(f"🔧 {member.mention} さんのレベルを **Level {target_level}** に変更しました。（XPは0にリセットされました）")
 
-    # ログ通知
     embed = discord.Embed(title="🔧 コマンドログ: /levelset 実行", color=discord.Color.purple())
     embed.add_field(name="サーバー名", value=interaction.guild.name, inline=True)
     embed.add_field(name="実行者", value=interaction.user.mention, inline=True)
@@ -336,8 +375,7 @@ class PollSelect(discord.ui.Select):
     def __init__(self, message_id, options_list, max_values=1):
         super().__init__(
             placeholder="ここをタップして投票する選択肢を選んでください...",
-            min_values=1,
-            max_values=max_values,
+            min_values=1, max_values=max_values,
             options=[discord.SelectOption(label=opt, value=opt) for opt in options_list],
             custom_id=f"poll_select_{message_id}"
         )
@@ -346,9 +384,7 @@ class PollSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         if self.message_id not in active_polls:
             active_polls[self.message_id] = {}
-        
         active_polls[self.message_id][interaction.user.id] = self.values
-        
         chosen_text = ", ".join([f"**{v}**" for v in self.values])
         await interaction.response.send_message(f"✅ {chosen_text} に投票しました！変更したい場合は再度選び直せます。", ephemeral=True)
 
@@ -370,7 +406,6 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         votes = active_polls.pop(message_id, {})
         choice_counts = {choice: [] for choice in valid_choices}
         total_votes = 0
-        
         for user_id, chosen_list in votes.items():
             for chosen in chosen_list:
                 if chosen in choice_counts:
@@ -391,7 +426,6 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         end_embed.title = f"🔒 【終了】投票：{title}"
         end_embed.description = f"⏰ 投票時間は終了しました。\n\n{result_text}"
         end_embed.color = discord.Color.light_grey()
-        
         await message.edit(content=None, embed=end_embed, view=None)
         
         embed_log = discord.Embed(title="🔒 コマンドログ: 投票が終了しました", color=discord.Color.light_grey())
@@ -400,7 +434,6 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         embed_log.add_field(name="投票テーマ", value=title, inline=False)
         embed_log.add_field(name="最終結果と投票者内訳", value=result_text, inline=False)
         await send_channel_log(bot, embed_log)
-        
     except Exception as e:
         print(f"投票の自動締め切り処理でエラーが発生しました: {e}")
 
@@ -444,7 +477,6 @@ async def mo(
     try:
         await interaction.response.send_message("投票を作成中...", ephemeral=True)
         poll_message = await channel.send(content="@here", embed=poll_embed)
-        
         max_vals = 1 if mode == "single" else len(valid_choices)
         view = PollView(poll_message.id, valid_choices, max_values=max_vals)
         await poll_message.edit(view=view)
