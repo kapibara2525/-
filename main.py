@@ -8,9 +8,9 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 
 # ========================================================
-# 通知先の設定（NK_banann2JPさんのユーザーID）
+# 通知先の設定（botログテキストチャンネルのID）
 # ========================================================
-LOG_USER_ID = 1142365276290162788
+LOG_CHANNEL_ID = 1518765558160691230
 
 # ========================================================
 # 【Render無料プラン用】自動停止を防ぐためのダミーWebサーバー
@@ -29,18 +29,22 @@ intents.message_content = True
 intents.members = True 
 
 warn_data = {}
-
-# 投票中のデータを一時保存するグローバル辞書
 active_polls = {}
 
-async def send_dm_log(bot_instance, embed):
+# ========================================================
+# 共通関数：指定したチャンネルにログを送信するヘルパー
+# ========================================================
+async def send_channel_log(bot_instance, embed):
     try:
-        user = await bot_instance.fetch_user(LOG_USER_ID)
-        if user:
-            await user.send(embed=embed)
+        channel = bot_instance.get_channel(LOG_CHANNEL_ID) or await bot_instance.fetch_channel(LOG_CHANNEL_ID)
+        if channel:
+            await channel.send(embed=embed)
     except Exception as e:
-        print(f"DMログの送信に失敗しました: {e}")
+        print(f"チャンネルログの送信に失敗しました: {e}")
 
+# ========================================================
+# 警告の有効期限（3週間）を定期チェックするタスク
+# ========================================================
 @tasks.loop(minutes=1)
 async def check_warn_expiry():
     now = datetime.now(timezone.utc)
@@ -58,7 +62,7 @@ async def check_warn_expiry():
         embed = discord.Embed(title="⏰ 警告の自動システム解除通知", color=discord.Color.blue())
         embed.add_field(name="対象ユーザーID", value=f"<@{user_id}> (`{user_id}`)", inline=False)
         embed.add_field(name="内容", value="3週間経過したため、警告カウントが自動リセットされました。", inline=False)
-        await send_dm_log(bot, embed)
+        await send_channel_log(bot, embed)
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -145,13 +149,13 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         embed_log.add_field(name="チャンネル", value=f"<#{channel_id}>", inline=True)
         embed_log.add_field(name="投票テーマ", value=title, inline=False)
         embed_log.add_field(name="最終結果と投票者内訳", value=result_text, inline=False)
-        await send_dm_log(bot, embed_log)
+        await send_channel_log(bot, embed_log)
         
     except Exception as e:
         print(f"投票の自動締め切り処理でエラーが発生しました: {e}")
 
 # ========================================================
-# /mo コマンド本体（選択肢10個拡張版）
+# /mo コマンド本体
 # ========================================================
 @bot.tree.command(name="mo", description="指定したチャンネルにメニュー選択式の投票を作成します（最大10択）")
 @app_commands.describe(
@@ -201,16 +205,13 @@ async def mo(
 
     log_choices_text = ""
     for choice in valid_choices:
-        poll_embed.add_field(name=f"・ {choice}", value=" ", inline=False)
         log_choices_text += f"・ {choice}\n"
 
     try:
         await interaction.response.send_message("投票を作成中...", ephemeral=True)
         poll_message = await channel.send(content="@here", embed=poll_embed)
         
-        # 複数選択の場合は、入力された有効な選択肢の数を上限（最大10）にする
         max_vals = 1 if mode == "single" else len(valid_choices)
-        
         view = PollView(poll_message.id, valid_choices, max_values=max_vals)
         await poll_message.edit(view=view)
         
@@ -220,7 +221,7 @@ async def mo(
         embed_log.add_field(name="投票形式", value=mode_text, inline=True)
         embed_log.add_field(name="制限時間", value=f"{minutes} 分", inline=True)
         embed_log.add_field(name="投票テーマ", value=title, inline=False)
-        await send_dm_log(bot, embed_log)
+        await send_channel_log(bot, embed_log)
 
         asyncio.create_task(poll_timer(interaction.guild.id, channel.id, poll_message.id, minutes, title, valid_choices))
 
@@ -230,7 +231,7 @@ async def mo(
         print(f"エラーが発生しました: {e}")
 
 # ========================================================
-# 既存の /chat, /warn, /unwarn, /warns コマンド (変更なし)
+# /chat コマンド本体
 # ========================================================
 @bot.tree.command(name="chat", description="指定したチャンネルにメッセージを送信します")
 @app_commands.describe(channel="メッセージを送信したいチャンネルを選択してください", text="送信する本文を入力してください")
@@ -244,12 +245,15 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
             embed.add_field(name="実行者", value=f"{interaction.user.mention} ({interaction.user.name})", inline=True)
             embed.add_field(name="送信先チャンネル", value=f"{channel.mention}", inline=True)
             embed.add_field(name="送信内容", value=text, inline=False)
-            await send_dm_log(bot, embed)
+            await send_channel_log(bot, embed)
         except discord.Forbidden:
             await interaction.response.send_message(f"#{channel.name} への送信権限がありません。", ephemeral=True)
     else:
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
+# ========================================================
+# /warn コマンド本体
+# ========================================================
 @bot.tree.command(name="warn", description="ユーザーに警告を付与し、回数に応じて自動で処罰します")
 @app_commands.describe(member="警告するユーザーを選択してください", count="付与する警告の個数を入力してください", reason="警告の理由を入力してください")
 async def warn(interaction: discord.Interaction, member: discord.Member, count: int, reason: str):
@@ -270,7 +274,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     total_warns = warn_data[user_id]["count"]
     msg = f"⚠️ **ユーザーに警告を与えました**\n**対象者:** {member.mention}\n**今回ついた警告:** {count} 個\n**理由:** {reason}\n**現在の合計警告数:** `{total_warns}` 個\n"
     punishment_msg = ""
-    punishment_log_str = "特なし"
+    punishment_log_str = "特になし"
     try:
         if total_warns >= 10:
             await member.ban(reason=f"警告合計{total_warns}回に到達のため自動BAN")
@@ -299,8 +303,11 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     embed.add_field(name="今回の警告数 / 理由", value=f"`{count}` 個 / {reason}", inline=False)
     embed.add_field(name="現在の合計警告数", value=f"`{total_warns}` 個", inline=True)
     embed.add_field(name="自動処罰結果", value=punishment_log_str, inline=True)
-    await send_dm_log(bot, embed)
+    await send_channel_log(bot, embed)
 
+# ========================================================
+# /unwarn コマンド本体
+# ========================================================
 @bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
 @app_commands.describe(member="警告を解除したいユーザーを選択してください", amount="消す警告の数を入力してください")
 async def unwarn(interaction: discord.Interaction, member: discord.Member, amount: int = None):
@@ -330,8 +337,11 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member, amoun
     embed.add_field(name="実行した管理者", value=f"{interaction.user.mention}", inline=True)
     embed.add_field(name="解除された人", value=f"{member.mention}", inline=True)
     embed.add_field(name="修正後の合計警告数", value=f"`{data['count']}` 個", inline=True)
-    await send_dm_log(bot, embed)
+    await send_channel_log(bot, embed)
 
+# ========================================================
+# /warns コマンド本体
+# ========================================================
 @bot.tree.command(name="warns", description="指定したユーザーの警告履歴を確認します")
 @app_commands.describe(member="警告履歴を見たいユーザーを選択してください")
 async def warns(interaction: discord.Interaction, member: discord.Member):
