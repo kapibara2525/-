@@ -136,10 +136,9 @@ async def check_and_update_level_roles(member, level):
         target_role_name = f"{role_name_prefix}{target_lvl}"
         target_role = discord.utils.get(member.guild.roles, name=target_role_name)
         
-        # ロールがなければ自動作成を試みる
         if not target_role:
             try:
-                target_role = await member.guild.create_role(name=target_role_name, color=discord.Color.green(), reason="レベルシステムによる自動作成")
+                target_role = await member.guild.create_role(name=target_role_name, color=discord.Color.from_rgb(46, 204, 113), reason="レベルシステムによる自動作成")
             except discord.Forbidden:
                 print(f"ロールの作成権限がありません: {target_role_name}")
                 return
@@ -236,19 +235,12 @@ async def rolecreate(interaction: discord.Interaction):
         await interaction.response.send_message("このコマンドを実行する権限（ロール管理権限）がありません。", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True) # 処理に時間がかかるので保留状態にする
+    await interaction.response.defer(ephemeral=True)
 
-    # 生成すべきレベルリストの算出
     levels_to_create = []
-    # 5〜95レベ (5ごと)
-    for l in range(5, 100, 5):
-        levels_to_create.append(l)
-    # 100〜190レベ (10ごと)
-    for l in range(100, 200, 10):
-        levels_to_create.append(l)
-    # 200〜500レベ (50ごと)
-    for l in range(200, 501, 50):
-        levels_to_create.append(l)
+    for l in range(5, 100, 5): levels_to_create.append(l)
+    for l in range(100, 200, 10): levels_to_create.append(l)
+    for l in range(200, 501, 50): levels_to_create.append(l)
 
     created_count = 0
     skipped_count = 0
@@ -256,25 +248,22 @@ async def rolecreate(interaction: discord.Interaction):
     try:
         for lvl in levels_to_create:
             role_name = f"Level {lvl}"
-            # 既に同じ名前のロールがあるか確認
             existing_role = discord.utils.get(interaction.guild.roles, name=role_name)
             
             if not existing_role:
-                # ロールを作成 (色は見やすい緑系)
                 await interaction.guild.create_role(
                     name=role_name, 
                     color=discord.Color.from_rgb(46, 204, 113), 
                     reason="レベルシステム一括初期作成"
                 )
                 created_count += 1
-                await asyncio.sleep(0.5) # Discordのレートリミット（連投制限）対策
+                await asyncio.sleep(0.5)
             else:
                 skipped_count += 1
 
         status_msg = f"✅ ロールの作成が完了しました！\n・新しく作成したロール: `{created_count}` 個\n・既に存在したためスキップ: `{skipped_count}` 個"
         await interaction.followup.send(status_msg)
 
-        # ログ通知
         embed = discord.Embed(title="🛠️ コマンドログ: /rolecreate 実行", color=discord.Color.blue())
         embed.add_field(name="サーバー名", value=interaction.guild.name, inline=True)
         embed.add_field(name="実行者", value=interaction.user.mention, inline=True)
@@ -394,7 +383,7 @@ class PollView(discord.ui.View):
         self.add_item(PollSelect(message_id, options_list, max_values))
 
 # ========================================================
-# タイマーと集計処理 (既存)
+# タイマーと集計処理 (人数・総人数カウント機能追加)
 # ========================================================
 async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_choices):
     await asyncio.sleep(minutes * 60)
@@ -405,8 +394,14 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         
         votes = active_polls.pop(message_id, {})
         choice_counts = {choice: [] for choice in valid_choices}
+        
+        # 実際に投票ボタンを押したユニークな人数をカウント
+        unique_voters = set()
         total_votes = 0
+        
         for user_id, chosen_list in votes.items():
+            if chosen_list:
+                unique_voters.add(user_id) # 投票者セットに追加
             for chosen in chosen_list:
                 if chosen in choice_counts:
                     choice_counts[chosen].append(f"<@{user_id}>")
@@ -415,12 +410,14 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         result_text = "ーー 【集計結果】 ーー\n"
         for choice in valid_choices:
             voters = choice_counts[choice]
-            count = len(voters)
+            count = len(voters) # この選択肢を選んだ人数
             if count > 0:
-                result_text += f"🔹 **{choice}**: `{count}` 票\n└ 投票者: {', '.join(voters)}\n"
+                result_text += f"🔹 **{choice}**: `{count}` 人\n└ 投票者: {', '.join(voters)}\n"
             else:
-                result_text += f"🔹 **{choice}**: `0` 票\n└ 投票者: なし\n"
-        result_text += f"\n総得票数: `{total_votes}` 票"
+                result_text += f"🔹 **{choice}**: `0` 人\n└ 投票者: なし\n"
+        
+        # 統計情報を追加
+        result_text += f"\n📊 投票参加人数: `{len(unique_voters)}` 人 (総得票数: `{total_votes}` 票)"
 
         end_embed = message.embeds[0]
         end_embed.title = f"🔒 【終了】投票：{title}"
