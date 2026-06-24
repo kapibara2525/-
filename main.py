@@ -10,12 +10,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 
 # ========================================================
-# 通知先の設定（botログテキストチャンネルのID）
-# ========================================================
-LOG_CHANNEL_ID = 1518765558160691230
-
-# ========================================================
-# 【Render強制終了対策】正しいポートで応答するダミーサーバー
+# 【Render強制終了対策】正しいポートで即座に応答するダミーサーバー
 # ========================================================
 class MyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -25,19 +20,20 @@ class MyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write("Bot is running!".encode("utf-8"))
 
     def log_message(self, format, *args):
-        # 5分ごとのアクセスログで画面が埋まるのを防ぐため、ログ出力を無視
-        return
+        return  # ログ出力を無視して画面をスッキリさせる
 
 def run_dummy_server():
-    # Renderは環境変数 PORT を指定してくるため、それを最優先で聴取する
     port = int(os.environ.get('PORT', 8080))
     server = http.server.HTTPServer(('0.0.0.0', port), MyHandler)
-    print(f"Render用ダミーサーバーをポート {port} で起動しました。")
+    print(f"【システム】Render用ダミーサーバーをポート {port} で起動しました。")
     server.serve_forever()
 
-# 完全に別スレッドでサーバーを並行起動
+# 何よりも真っ先に、別スレッドでサーバーを並行起動してRenderのチェックを通す
 threading.Thread(target=run_dummy_server, daemon=True).start()
 # ========================================================
+
+# 通知先の設定（botログテキストチャンネルのID）
+LOG_CHANNEL_ID = 1518765558160691230
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -83,32 +79,44 @@ async def send_channel_log(bot_instance, embed):
 
 @tasks.loop(minutes=1)
 async def check_warn_expiry():
-    now = datetime.now(timezone.utc)
-    expired_users = []
-    for user_id, data in warn_data.items():
-        if data.get("count", 0) > 0 and now >= datetime.fromisoformat(data["expire_at"]):
-            expired_users.append(user_id)
-    for user_id in expired_users:
-        warn_data[user_id]["count"] = 0
-        warn_data[user_id]["logs"].append({
-            "count": 0,
-            "reason": "【システム自動解除】3週間が経過したため警告がすべてリセットされました。",
-            "date": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-        })
-        save_all_data()
-        embed = discord.Embed(title="⏰ 警告の自動システム解除通知", color=discord.Color.blue())
-        embed.add_field(name="対象ユーザーID", value=f"<@{user_id}> (`{user_id}`)", inline=False)
-        embed.add_field(name="内容", value="3週間経過したため、警告カウントが自動リセットされました。", inline=False)
-        await send_channel_log(bot, embed)
+    try:
+        now = datetime.now(timezone.utc)
+        expired_users = []
+        for user_id, data in warn_data.items():
+            if data.get("count", 0) > 0 and now >= datetime.fromisoformat(data["expire_at"]):
+                expired_users.append(user_id)
+        for user_id in expired_users:
+            warn_data[user_id]["count"] = 0
+            warn_data[user_id]["logs"].append({
+                "count": 0,
+                "reason": "【システム自動解除】3週間が経過したため警告がすべてリセットされました。",
+                "date": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            })
+            save_all_data()
+            embed = discord.Embed(title="⏰ 警告の自動システム解除通知", color=discord.Color.blue())
+            embed.add_field(name="対象ユーザーID", value=f"<@{user_id}> (`{user_id}`)", inline=False)
+            embed.add_field(name="内容", value="3週間経過したため、警告カウントが自動リセットされました。", inline=False)
+            await send_channel_log(bot, embed)
+    except Exception as e:
+        print(f"警告解除処理でエラーが発生しました: {e}")
 
 class MyBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
+        # 無料枠の低スペック環境に耐えるため、タイムアウトを120秒に延長
+        super().__init__(command_prefix="!", intents=intents, heartbeat_timeout=120.0)
 
     async def setup_hook(self):
         check_warn_expiry.start()
-        await self.tree.sync()
-        print("スラッシュコマンドを同期しました。")
+        # 起動直後の切断を防ぐため、少しだけ遅らせてコマンドを同期
+        asyncio.create_task(self.delayed_sync())
+
+    async def delayed_sync(self):
+        await asyncio.sleep(5)
+        try:
+            await self.tree.sync()
+            print("スラッシュコマンドを同期しました。")
+        except Exception as e:
+            print(f"コマンドの同期に失敗しました（動作は続行します）: {e}")
 
 bot = MyBot()
 
@@ -123,14 +131,10 @@ def get_next_level_xp(level):
     return level * 100
 
 def should_have_role(level):
-    if level >= 500:
-        return 500
-    elif level >= 200:
-        return (level // 50) * 50
-    elif level >= 100:
-        return (level // 10) * 10
-    elif level >= 5:
-        return (level // 5) * 5
+    if level >= 500: return 500
+    elif level >= 200: return (level // 50) * 50
+    elif level >= 100: return (level // 10) * 10
+    elif level >= 5: return (level // 5) * 5
     return None
 
 async def check_and_update_level_roles(member, level):
@@ -161,8 +165,7 @@ async def check_and_update_level_roles(member, level):
 
 async def add_xp(member, amount):
     global xp_enabled
-    if not xp_enabled:
-        return
+    if not xp_enabled: return
 
     user_id = str(member.id)
     if user_id not in xp_data:
@@ -196,8 +199,7 @@ async def add_xp(member, amount):
 
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
-        return
+    if message.author.bot or not message.guild: return
 
     user_id = message.author.id
     now = datetime.now(timezone.utc)
@@ -217,8 +219,7 @@ async def on_member_join(member):
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    if payload.user_id == bot.user.id or not payload.guild_id:
-        return
+    if payload.user_id == bot.user.id or not payload.guild_id: return
     guild = bot.get_guild(payload.guild_id)
     if not guild: return
     member = payload.member
@@ -253,11 +254,7 @@ async def rolecreate(interaction: discord.Interaction):
             existing_role = discord.utils.get(interaction.guild.roles, name=role_name)
             
             if not existing_role:
-                await interaction.guild.create_role(
-                    name=role_name, 
-                    color=discord.Color.from_rgb(46, 204, 113), 
-                    reason="レベルシステム一括初期作成"
-                )
+                await interaction.guild.create_role(name=role_name, color=discord.Color.from_rgb(46, 204, 113), reason="レベルシステム一括初期作成")
                 created_count += 1
                 await asyncio.sleep(0.5)
             else:
@@ -547,7 +544,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     embed.add_field(name="サーバー名", value=f"**{interaction.guild.name}**", inline=False)
     embed.add_field(name="実行した管理者", value=f"{interaction.user.mention}", inline=True)
     embed.add_field(name="警告された人", value=f"{member.mention}", inline=True)
-    embed.add_field(name="今回の警告数 / 理由", value=f"`{count}` 個 / {reason}", inline=False)
+    embed.add_field(name="今回商の警告数 / 理由", value=f"`{count}` 個 / {reason}", inline=False)
     embed.add_field(name="現在の合計警告数", value=f"`{total_warns}` 個", inline=True)
     embed.add_field(name="自動処罰結果", value=punishment_log_str, inline=True)
     await send_channel_log(bot, embed)
@@ -601,10 +598,23 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
 
 TOKEN = os.environ.get('DISCORD_TOKEN')
 
-# 何らかのエラーでDiscord接続が切れても自動ループで復活を試みる設定
+# ========================================================
+# 【絶対死なない無限再接続メインループ】
+# ========================================================
 async def main():
-    async with bot:
-        await bot.start(TOKEN)
+    while True:
+        try:
+            async with bot:
+                await bot.start(TOKEN)
+        except discord.errors.LoginFailure:
+            print("【致命的エラー】DISCORD_TOKENが間違っているか無効化されています。")
+            break
+        except Exception as e:
+            print(f"【切断検知】一時的な切断が発生しました。5秒後に自動再接続します: {e}")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
