@@ -15,15 +15,28 @@ from datetime import datetime, timedelta, timezone
 LOG_CHANNEL_ID = 1518765558160691230
 
 # ========================================================
-# 【Render無料プラン用】自動停止を防ぐためのダミーWebサーバー
+# 【Render強制終了対策】正しいポートで応答するダミーサーバー
 # ========================================================
+class MyHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Bot is running!".encode("utf-8"))
+
+    def log_message(self, format, *args):
+        # 5分ごとのアクセスログで画面が埋まるのを防ぐため、ログ出力を無視
+        return
+
 def run_dummy_server():
+    # Renderは環境変数 PORT を指定してくるため、それを最優先で聴取する
     port = int(os.environ.get('PORT', 8080))
-    server = http.server.HTTPServer(('0.0.0.0', port), http.server.BaseHTTPRequestHandler)
+    server = http.server.HTTPServer(('0.0.0.0', port), MyHandler)
+    print(f"Render用ダミーサーバーをポート {port} で起動しました。")
     server.serve_forever()
 
+# 完全に別スレッドでサーバーを並行起動
 threading.Thread(target=run_dummy_server, daemon=True).start()
-print("Render用のダミーサーバーが起動しました。")
 # ========================================================
 
 intents = discord.Intents.default()
@@ -31,17 +44,14 @@ intents.message_content = True
 intents.members = True 
 intents.reactions = True
 
-# データ保存用のファイル名
 DATA_FILE = "bot_data.json"
 
-# グローバル変数の初期化
 warn_data = {}
 active_polls = {}
-xp_data = {}        # 構造: { str(user_id): {"level": 1, "xp": 0} }
-xp_enabled = True   # レベル機能のオンオフ状態（デフォルトはオン）
-last_xp_time = {}   # チャット連投対策用 { user_id: datetime }
+xp_data = {}        
+xp_enabled = True   
+last_xp_time = {}   
 
-# データの読み込み
 if os.path.exists(DATA_FILE):
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -52,7 +62,6 @@ if os.path.exists(DATA_FILE):
     except Exception as e:
         print(f"データファイルの読み込みに失敗しました: {e}")
 
-# データをファイルに保存する関数
 def save_all_data():
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -111,11 +120,9 @@ async def on_ready():
 # レベルシステム用ヘルパー関数
 # ========================================================
 def get_next_level_xp(level):
-    """次のレベルに上がるために必要な合計XPを計算"""
     return level * 100
 
 def should_have_role(level):
-    """現在のレベルで付与されるべきロールのレベルを算出"""
     if level >= 500:
         return 500
     elif level >= 200:
@@ -127,7 +134,6 @@ def should_have_role(level):
     return None
 
 async def check_and_update_level_roles(member, level):
-    """レベルに応じたロールを自動作成・付与し、古いレベルロールを削除する"""
     target_lvl = should_have_role(level)
     role_name_prefix = "Level "
     
@@ -154,7 +160,6 @@ async def check_and_update_level_roles(member, level):
         print(f"メンバー {member.name} へのロール操作権限が不足しています。")
 
 async def add_xp(member, amount):
-    """XPを加算し、レベルアップ処理を行う"""
     global xp_enabled
     if not xp_enabled:
         return
@@ -189,9 +194,6 @@ async def add_xp(member, amount):
     if leveled_up:
         await check_and_update_level_roles(member, current_level)
 
-# ========================================================
-# イベントリスナー（XP獲得トリガー）
-# ========================================================
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild:
@@ -226,7 +228,7 @@ async def on_raw_reaction_add(payload):
     await add_xp(member, xp_to_add)
 
 # ========================================================
-# レベルシステム関連のスラッシュコマンド
+# スラッシュコマンド群
 # ========================================================
 
 @bot.tree.command(name="rolecreate", description="レベルシステム用（5〜500レベ）の全ロールを自動で一括作成します")
@@ -357,9 +359,6 @@ async def levelset(interaction: discord.Interaction, member: discord.Member, tar
     embed.add_field(name="変更後のレベル", value=f"Lv {target_level}", inline=False)
     await send_channel_log(bot, embed)
 
-# ========================================================
-# セレクトメニュー方式の投票 UI コンポーネント (既存)
-# ========================================================
 class PollSelect(discord.ui.Select):
     def __init__(self, message_id, options_list, max_values=1):
         super().__init__(
@@ -382,9 +381,6 @@ class PollView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(PollSelect(message_id, options_list, max_values))
 
-# ========================================================
-# タイマーと集計処理 (人数・総人数カウント機能追加)
-# ========================================================
 async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_choices):
     await asyncio.sleep(minutes * 60)
     try:
@@ -394,14 +390,12 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         
         votes = active_polls.pop(message_id, {})
         choice_counts = {choice: [] for choice in valid_choices}
-        
-        # 実際に投票ボタンを押したユニークな人数をカウント
         unique_voters = set()
         total_votes = 0
         
         for user_id, chosen_list in votes.items():
             if chosen_list:
-                unique_voters.add(user_id) # 投票者セットに追加
+                unique_voters.add(user_id)
             for chosen in chosen_list:
                 if chosen in choice_counts:
                     choice_counts[chosen].append(f"<@{user_id}>")
@@ -410,13 +404,12 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
         result_text = "ーー 【集計結果】 ーー\n"
         for choice in valid_choices:
             voters = choice_counts[choice]
-            count = len(voters) # この選択肢を選んだ人数
+            count = len(voters)
             if count > 0:
                 result_text += f"🔹 **{choice}**: `{count}` 人\n└ 投票者: {', '.join(voters)}\n"
             else:
                 result_text += f"🔹 **{choice}**: `0` 人\n└ 投票者: なし\n"
         
-        # 統計情報を追加
         result_text += f"\n📊 投票参加人数: `{len(unique_voters)}` 人 (総得票数: `{total_votes}` 票)"
 
         end_embed = message.embeds[0]
@@ -434,9 +427,6 @@ async def poll_timer(guild_id, channel_id, message_id, minutes, title, valid_cho
     except Exception as e:
         print(f"投票の自動締め切り処理でエラーが発生しました: {e}")
 
-# ========================================================
-# /mo コマンド本体 (既存)
-# ========================================================
 @bot.tree.command(name="mo", description="指定したチャンネルにメニュー選択式の投票を作成します（最大10択）")
 @app_commands.describe(
     channel="投票を出したいチャンネルを選択してください", title="投票の本文（タイトル）を入力してください",
@@ -492,9 +482,6 @@ async def mo(
     except Exception as e:
         print(f"エラーが発生しました: {e}")
 
-# ========================================================
-# /chat コマンド本体 (既存)
-# ========================================================
 @bot.tree.command(name="chat", description="指定したチャンネルにメッセージを送信します")
 @app_commands.describe(channel="メッセージを送信したいチャンネルを選択してください", text="送信する本文を入力してください")
 async def chat(interaction: discord.Interaction, channel: discord.TextChannel, text: str):
@@ -513,9 +500,6 @@ async def chat(interaction: discord.Interaction, channel: discord.TextChannel, t
     else:
         await interaction.response.send_message("テキストチャンネルを指定してください。", ephemeral=True)
 
-# ========================================================
-# /warn コマンド本体 (既存)
-# ========================================================
 @bot.tree.command(name="warn", description="ユーザーに警告を付与し、回数に応じて自動で処罰します")
 @app_commands.describe(member="警告するユーザーを選択してください", count="付与する警告の個数を入力してください", reason="警告の理由を入力してください")
 async def warn(interaction: discord.Interaction, member: discord.Member, count: int, reason: str):
@@ -568,9 +552,6 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     embed.add_field(name="自動処罰結果", value=punishment_log_str, inline=True)
     await send_channel_log(bot, embed)
 
-# ========================================================
-# /unwarn コマンド本体 (既存)
-# ========================================================
 @bot.tree.command(name="unwarn", description="ユーザーの警告を取り消します")
 @app_commands.describe(member="警告を解除したいユーザーを選択してください", amount="消す警告の数を入力してください")
 async def unwarn(interaction: discord.Interaction, member: discord.Member, amount: int = None):
@@ -603,9 +584,6 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member, amoun
     embed.add_field(name="修正後の合計警告数", value=f"`{data['count']}` 個", inline=True)
     await send_channel_log(bot, embed)
 
-# ========================================================
-# /warns コマンド本体 (既存)
-# ========================================================
 @bot.tree.command(name="warns", description="指定したユーザーの警告履歴を確認します")
 @app_commands.describe(member="警告履歴を見たいユーザーを選択してください")
 async def warns(interaction: discord.Interaction, member: discord.Member):
@@ -622,4 +600,11 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 TOKEN = os.environ.get('DISCORD_TOKEN')
-bot.run(TOKEN)
+
+# 何らかのエラーでDiscord接続が切れても自動ループで復活を試みる設定
+async def main():
+    async with bot:
+        await bot.start(TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())
