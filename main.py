@@ -20,7 +20,7 @@ class MyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write("Bot is running!".encode("utf-8"))
 
     def log_message(self, format, *args):
-        return  # ログ出力を無視して画面をスッキリさせる
+        return
 
 def run_dummy_server():
     port = int(os.environ.get('PORT', 8080))
@@ -28,11 +28,10 @@ def run_dummy_server():
     print(f"【システム】Render用ダミーサーバーをポート {port} で起動しました。")
     server.serve_forever()
 
-# 何よりも真っ先に、別スレッドでサーバーを並行起動してRenderのチェックを通す
 threading.Thread(target=run_dummy_server, daemon=True).start()
 # ========================================================
 
-# 通知先の設定（botログテキストチャンネルのID）
+# 通知先 兼 データバックアップチャンネルのID
 LOG_CHANNEL_ID = 1518765558160691230
 
 intents = discord.Intents.default()
@@ -48,15 +47,9 @@ xp_data = {}
 xp_enabled = True   
 last_xp_time = {}   
 
-if os.path.exists(DATA_FILE):
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            saved_data = json.load(f)
-            warn_data = saved_data.get("warn_data", {})
-            xp_data = saved_data.get("xp_data", {})
-            xp_enabled = saved_data.get("xp_enabled", True)
-    except Exception as e:
-        print(f"データファイルの読み込みに失敗しました: {e}")
+# /auto用のアナウンス設定
+auto_announce_channel_id = None
+auto_msg_count = 1
 
 def save_all_data():
     try:
@@ -64,10 +57,11 @@ def save_all_data():
             json.dump({
                 "warn_data": warn_data,
                 "xp_data": xp_data,
-                "xp_enabled": xp_enabled
+                "xp_enabled": xp_enabled,
+                "auto_announce_channel_id": auto_announce_channel_id
             }, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"データファイルの保存に失敗しました: {e}")
+        print(f"データファイルのローカル保存に失敗しました: {e}")
 
 async def send_channel_log(bot_instance, embed):
     try:
@@ -77,6 +71,81 @@ async def send_channel_log(bot_instance, embed):
     except Exception as e:
         print(f"チャンネルログの送信に失敗しました: {e}")
 
+# ========================================================
+# 【NEW】Discordのログチャンネルを使ったクラウドバックアップ・復元システム
+# ========================================================
+async def backup_data_to_discord(bot_instance):
+    """データをJSON文字列にしてログチャンネルに投稿する（消滅対策）"""
+    try:
+        channel = bot_instance.get_channel(LOG_CHANNEL_ID) or await bot_instance.fetch_channel(LOG_CHANNEL_ID)
+        if channel:
+            data_payload = {
+                "warn_data": warn_data,
+                "xp_data": xp_data,
+                "xp_enabled": xp_enabled,
+                "auto_announce_channel_id": auto_announce_channel_id
+            }
+            json_str = json.dumps(data_payload, ensure_ascii=False)
+            # Discordの文字数制限（2000文字）を考慮し、コードブロック形式で送信
+            # データが非常に大きくなる場合はファイルとして送信
+            if len(json_str) < 1900:
+                await channel.send(f"||BOT_BACKUP_DATA_START||\n```json\n{json_str}\n
+```\n||BOT_BACKUP_DATA_END||")
+            else:
+                with open("backup_temp.json", "w", encoding="utf-8") as tmp:
+                    json.dump(data_payload, tmp, ensure_ascii=False)
+                await channel.send("【データバックアップファイル】", file=discord.File("backup_temp.json", filename="bot_backup.json"))
+    except Exception as e:
+        print(f"Discordへの自動バックアップ送信に失敗しました: {e}")
+
+async def load_data_from_discord(bot_instance):
+    """ログチャンネルの過去ログから最新のバックアップデータを検索して復元する"""
+    global warn_data, xp_data, xp_enabled, auto_announce_channel_id
+    try:
+        channel = bot_instance.get_channel(LOG_CHANNEL_ID) or await bot_instance.fetch_channel(LOG_CHANNEL_ID)
+        if not channel:
+            return
+        
+        print("【システム】Discordのログチャンネルから過去のバックアップデータを捜索中...")
+        async for message in channel.history(limit=100):
+            # 1. テキストメッセージ形式のバックアップをパース
+            if "||BOT_BACKUP_DATA_START||" in message.content and message.author.id == bot_instance.user.id:
+                try:
+                    content = message.content.split("```json\n")[1].split("\n```")[0]
+                    loaded = json.loads(content)
+                    warn_data = loaded.get("warn_data", {})
+                    xp_data = loaded.get("xp_data", {})
+                    xp_enabled = loaded.get("xp_enabled", True)
+                    auto_announce_channel_id = loaded.get("auto_announce_channel_id", None)
+                    print("✅ Discordのテキスト履歴からデータを正常に復元しました！")
+                    save_all_data()
+                    return
+                except Exception:
+                    continue
+            
+            # 2. ファイル形式のバックアップをパース
+            if message.attachments and message.author.id == bot_instance.user.id:
+                for attachment in message.attachments:
+                    if attachment.filename == "bot_backup.json":
+                        try:
+                            file_bytes = await attachment.read()
+                            loaded = json.loads(file_bytes.decode("utf-8"))
+                            warn_data = loaded.get("warn_data", {})
+                            xp_data = loaded.get("xp_data", {})
+                            xp_enabled = loaded.get("xp_enabled", True)
+                            auto_announce_channel_id = loaded.get("auto_announce_channel_id", None)
+                            print("✅ Discordの添付ファイルからデータを正常に復元しました！")
+                            save_all_data()
+                            return
+                        except Exception:
+                            continue
+        print("ℹ️ 有効なバックアップデータがDiscord上に見つかりませんでした。新規作成します。")
+    except Exception as e:
+        print(f"Discordからのデータ復元中にエラーが発生しました: {e}")
+
+# ========================================================
+# 定期ループ処理（警告期限チェック＆3分間隔アナウンス）
+# ========================================================
 @tasks.loop(minutes=1)
 async def check_warn_expiry():
     try:
@@ -93,6 +162,7 @@ async def check_warn_expiry():
                 "date": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             })
             save_all_data()
+            await backup_data_to_discord(bot)
             embed = discord.Embed(title="⏰ 警告の自動システム解除通知", color=discord.Color.blue())
             embed.add_field(name="対象ユーザーID", value=f"<@{user_id}> (`{user_id}`)", inline=False)
             embed.add_field(name="内容", value="3週間経過したため、警告カウントが自動リセットされました。", inline=False)
@@ -100,18 +170,34 @@ async def check_warn_expiry():
     except Exception as e:
         print(f"警告解除処理でエラーが発生しました: {e}")
 
+@tasks.loop(minutes=3)
+async def auto_announce_loop():
+    """【NEW】/auto で設定されたチャンネルに3分ごとに生存メッセージを送るループ"""
+    global auto_announce_channel_id, auto_msg_count
+    if auto_announce_channel_id is None:
+        return
+    try:
+        channel = bot.get_channel(auto_announce_channel_id) or await bot.fetch_channel(auto_announce_channel_id)
+        if channel:
+            now_str = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S')
+            await channel.send(f"🤖 **【定期生存確認】** ボットは現在も正常に動作中だよ！ (確認回数: {auto_msg_count}回目 / 時刻: {now_str})")
+            auto_msg_count += 1
+    except Exception as e:
+        print(f"定期アナウンスの送信に失敗しました: {e}")
+
 class MyBot(commands.Bot):
     def __init__(self):
-        # 無料枠の低スペック環境に耐えるため、タイムアウトを120秒に延長
         super().__init__(command_prefix="!", intents=intents, heartbeat_timeout=120.0)
 
     async def setup_hook(self):
         check_warn_expiry.start()
-        # 起動直後の切断を防ぐため、少しだけ遅らせてコマンドを同期
+        auto_announce_loop.start()
         asyncio.create_task(self.delayed_sync())
 
     async def delayed_sync(self):
         await asyncio.sleep(5)
+        # 起動直後にDiscordからデータをダウンロードして復元
+        await load_data_from_discord(self)
         try:
             await self.tree.sync()
             print("スラッシュコマンドを同期しました。")
@@ -196,6 +282,8 @@ async def add_xp(member, amount):
 
     if leveled_up:
         await check_and_update_level_roles(member, current_level)
+        # レベルアップ時は重要なデータ変化なのでDiscordに即時バックアップ
+        await backup_data_to_discord(bot)
 
 @bot.event
 async def on_message(message):
@@ -216,6 +304,7 @@ async def on_member_join(member):
     if user_id not in xp_data:
         xp_data[user_id] = {"level": 1, "xp": 0}
         save_all_data()
+        await backup_data_to_discord(bot)
 
 @bot.event
 async def on_raw_reaction_add(payload):
@@ -231,6 +320,37 @@ async def on_raw_reaction_add(payload):
 # ========================================================
 # スラッシュコマンド群
 # ========================================================
+
+@bot.tree.command(name="auto", description="3分ごとの定期生存メッセージを送信するチャンネルを設定・変更します")
+@app_commands.describe(channel="定期メッセージを送信したいテキストチャンネルを選択してください。解除する場合は未選択か現在の設定と同じにしてください。")
+async def auto(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    """【NEW】/auto コマンドの実装"""
+    global auto_announce_channel_id, auto_msg_count
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("このコマンドを実行する権限（サーバー管理権限）がありません。", ephemeral=True)
+        return
+
+    if channel is None:
+        auto_announce_channel_id = None
+        save_all_data()
+        await backup_data_to_discord(bot)
+        await interaction.response.send_message("❌ 定期生存メッセージの設定を解除しました。")
+        return
+
+    auto_announce_channel_id = channel.id
+    auto_msg_count = 1  # カウントをリセット
+    save_all_data()
+    await backup_data_to_discord(bot)
+    
+    await interaction.response.send_message(f"✅ {channel.mention} を3分ごとの定期生存確認メッセージの送信先に設定しました！")
+    
+    # 即座に1回目のメッセージを送信テスト
+    try:
+        now_str = datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S')
+        await channel.send(f"🤖 **【定期生存確認】** /auto によりここがアナウンス先に設定されたよ！ (時刻: {now_str})")
+        auto_msg_count += 1
+    except Exception as e:
+        print(f"初期メッセージの送信に失敗しました: {e}")
 
 @bot.tree.command(name="rolecreate", description="レベルシステム用（5〜500レベ）の全ロールを自動で一括作成します")
 async def rolecreate(interaction: discord.Interaction):
@@ -294,6 +414,7 @@ async def xpmode(interaction: discord.Interaction, mode: str):
         status_text = "🔴 無効 (OFF)"
 
     save_all_data()
+    await backup_data_to_discord(bot)
     await interaction.response.send_message(f"⚙️ レベル・XPシステムを **{status_text}** に設定しました。")
     
     embed = discord.Embed(title="⚙️ コマンドログ: /xpmode 設定変更", color=discord.Color.orange())
@@ -345,6 +466,7 @@ async def levelset(interaction: discord.Interaction, member: discord.Member, tar
     user_id = str(member.id)
     xp_data[user_id] = {"level": target_level, "xp": 0}
     save_all_data()
+    await backup_data_to_discord(bot)
 
     await check_and_update_level_roles(member, target_level)
     await interaction.response.send_message(f"🔧 {member.mention} さんのレベルを **Level {target_level}** に変更しました。（XPは0にリセットされました）")
@@ -515,6 +637,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, count: 
     warn_data[user_id]["expire_at"] = new_expire_at.isoformat()
     warn_data[user_id]["logs"].append({"count": count, "reason": reason, "date": now.strftime('%Y-%m-%d %H:%M:%S')})
     save_all_data()
+    await backup_data_to_discord(bot)
     total_warns = warn_data[user_id]["count"]
     msg = f"⚠️ **ユーザーに警告を与えました**\n**対象者:** {member.mention}\n**今回ついた警告:** {count} 個\n**理由:** {reason}\n**現在の合計警告数:** `{total_warns}` 個\n"
     punishment_msg = ""
@@ -573,12 +696,13 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member, amoun
             if data["logs"]: data["logs"].pop()
         message = f"✅ {member.mention} の警告を最近のものから {actual_removed} 個削除しました。（残り {data['count']} 個）"
     save_all_data()
+    await backup_data_to_discord(bot)
     await interaction.response.send_message(message)
     embed = discord.Embed(title="🍏 コマンドログ: /unwarn (警告解除)", color=discord.Color.gold())
     embed.add_field(name="サーバー名", value=f"**{interaction.guild.name}**", inline=False)
     embed.add_field(name="実行した管理者", value=f"{interaction.user.mention}", inline=True)
     embed.add_field(name="解除された人", value=f"{member.mention}", inline=True)
-    embed.add_field(name="修正後の合計警告数", value=f"`{data['count']}` 個", inline=True)
+    embed.add_field(name="🔧正後の合計警告数", value=f"`{data['count']}` 個", inline=True)
     await send_channel_log(bot, embed)
 
 @bot.tree.command(name="warns", description="指定したユーザーの警告履歴を確認します")
