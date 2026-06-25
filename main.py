@@ -88,10 +88,12 @@ async def backup_data_to_discord(bot_instance):
             json_str = json.dumps(data_payload, ensure_ascii=False)
             # Discordの文字数制限（2000文字）を考慮し、コードブロック形式で送信
             # データが非常に大きくなる場合はファイルとして送信
-            if len(json_str) < 1900:
-                await channel.send(f"||BOT_BACKUP_DATA_START||\n```json\n{json_str}\n
-```\n||BOT_BACKUP_DATA_END||")
-            else:
+            # ーーー 修正後 ーーー
+if len(json_str) < 1900:
+    await channel.send(f"""||BOT_BACKUP_DATA_START||
+```json
+{json_str}
+
                 with open("backup_temp.json", "w", encoding="utf-8") as tmp:
                     json.dump(data_payload, tmp, ensure_ascii=False)
                 await channel.send("【データバックアップファイル】", file=discord.File("backup_temp.json", filename="bot_backup.json"))
